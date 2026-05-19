@@ -19,7 +19,8 @@ It is not a port of that code.
 - `POST /servers` — alias for `POST /heartbeat` (akashi compatibility).
 - **Ranking system** — servers are ranked by player count first, with heartbeat
   stability as a tiebreaker (see [Ranking](#ranking)).
-- Ever-rising `hbcounter` per server, with rollover (10080 → 9000).
+- Clock-anchored `hbcounter` per server — minutes of master-verified uptime,
+  with rollover (10080 → 9000).
 - IP auto-detection when `ip` is omitted from heartbeat — reads
   `X-Forwarded-For` / `X-Real-IP` headers first, then falls back to the
   connecting IP. Works correctly behind nginx / Caddy.
@@ -105,14 +106,22 @@ use it directly.
 
 ## HBCounter & rollover
 
-Each heartbeat increments a server's `hbcounter` by 1. The counter is designed
-to reflect uptime stability:
+`hbcounter` measures a server's uptime in **minutes**, counted against the
+master server's own clock — not the number of heartbeats received:
 
-- **Cap:** `10080` — reached after exactly 7 days of heartbeats at 1 per minute.
+- **Registration** sets the counter to `1`.
+- Each later heartbeat advances it by the **whole minutes of real time** that
+  have elapsed since the counter was last advanced. A heartbeat 5 minutes
+  after the previous one adds `+5`; leftover seconds are carried forward so
+  they accrue toward the next minute.
+- Heartbeats arriving faster than once a minute add **nothing** — a server
+  cannot inflate its counter (and its rank) by flooding the master with
+  pings. The value reflects legitimate, master-verified uptime.
+- **Cap:** `10080` — reached after exactly 7 days of uptime at 1 per minute.
 - **Rollover:** when the cap is hit the counter drops to `9000` and keeps
   climbing. This prevents any server from holding a permanently insurmountable
   score lead purely from age.
-- Both values are configurable via `MS_HBCOUNTER_CAP` and
+- Both cap values are configurable via `MS_HBCOUNTER_CAP` and
   `MS_HBCOUNTER_ROLLOVER_DROP`.
 
 ## API
@@ -131,7 +140,7 @@ Each object:
 | `name`        | string  | Display name.                                          |
 | `description` | string  | Free text.                                             |
 | `players`     | integer | Current player count.                                  |
-| `hbcounter`   | integer | Heartbeat stability counter (max 10080, rolls to 9000).|
+| `hbcounter`   | integer | Uptime in minutes, master-verified (max 10080, rolls to 9000).|
 | `score`       | integer | Computed rank score (`players * 10081 + hbcounter`).   |
 | `ws_port`     | integer | Plain WebSocket port for WebAO. *Omitted* when unset.  |
 | `wss_port`    | integer | Secure WebSocket port for WebAO. *Omitted* when unset. |
@@ -170,8 +179,9 @@ Registers or refreshes a server. Both endpoints are identical — `POST /servers
 exists for compatibility with **akashi**, which advertises there by default.
 
 A server is identified uniquely by `ip:port`. On each heartbeat the record is
-upserted, `last_seen` is updated, and that server's `hbcounter` is incremented
-(rolling over at the cap). The stored record is returned.
+upserted, `last_seen` is updated, and that server's `hbcounter` is advanced by
+the whole minutes of real time elapsed since it was last advanced (rolling
+over at the cap). The stored record is returned.
 
 **`ip` is optional.** If omitted or empty, the master server fills it in
 automatically from the request's `X-Forwarded-For` / `X-Real-IP` headers, or
@@ -246,8 +256,9 @@ pip install -r requirements-dev.txt
 pytest
 ```
 
-Tests cover registration, heartbeat refresh, `hbcounter` increment and
-rollover, stale-server expiry, and input validation.
+Tests cover registration, heartbeat refresh, `hbcounter` time-based advance
+and rollover, abuse resistance to rapid heartbeats, stale-server expiry, and
+input validation.
 
 ## License
 

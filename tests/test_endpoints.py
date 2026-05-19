@@ -54,12 +54,14 @@ async def test_heartbeat_registers_and_appears_in_listing(client):
     assert servers[0]["players"] == 4
 
 
-async def test_heartbeat_refresh_increments_hbcounter(client):
+async def test_heartbeat_refresh_does_not_inflate_hbcounter(client):
+    # Rapid refreshes within the same minute must not advance the counter --
+    # hbcounter tracks real elapsed time, not the number of pings.
     payload = {"ip": "1.2.3.4", "port": 27016}
     first = await (await client.post("/heartbeat", json=payload)).json()
     second = await (await client.post("/heartbeat", json=payload)).json()
     assert first["hbcounter"] == 1
-    assert second["hbcounter"] == 2
+    assert second["hbcounter"] == 1
 
     servers = await (await client.get("/servers")).json()
     assert len(servers) == 1

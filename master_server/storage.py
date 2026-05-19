@@ -32,6 +32,11 @@ class Server:
     wss_port: Optional[int] = None
     hbcounter: int = 0
     last_seen: float = field(default_factory=time.time)
+    # Wall-clock time the current ``hbcounter`` value corresponds to. The
+    # counter is advanced against this anchor (not the raw heartbeat rate), so
+    # a server cannot inflate it by sending heartbeats faster than once a
+    # minute. Internal bookkeeping only — never exposed by ``public_dict``.
+    hb_anchor: float = field(default_factory=time.time)
 
     @property
     def key(self) -> str:
@@ -69,14 +74,18 @@ class Server:
         return data
 
 
-def next_hbcounter(current: int, cap: int, drop: int) -> int:
-    """Increment a heartbeat counter, applying rollover.
+def next_hbcounter(current: int, elapsed_minutes: int, cap: int, drop: int) -> int:
+    """Advance a heartbeat counter by whole minutes of elapsed uptime.
 
-    The counter rises by one each heartbeat. Once it reaches ``cap`` it is
+    ``hbcounter`` tracks minutes of uptime measured against the master's own
+    clock — the cap is sized as "1 per minute". A heartbeat advances the
+    counter by the whole minutes that have genuinely elapsed since it was last
+    advanced, so flooding the master with rapid heartbeats cannot inflate it:
+    sub-minute beats add nothing. Once the counter reaches ``cap`` it is
     dropped to ``cap - drop`` and keeps climbing, matching what AO monitoring
     tooling expects to observe.
     """
-    nxt = current + 1
+    nxt = current + elapsed_minutes
     if nxt >= cap:
         return cap - drop
     return nxt
@@ -96,8 +105,9 @@ class Storage(abc.ABC):
     ) -> Server:
         """Register or refresh a server from validated heartbeat ``fields``.
 
-        Updates ``last_seen`` to ``now`` and increments ``hbcounter`` (with
-        rollover). Returns the stored :class:`Server`.
+        Updates ``last_seen`` to ``now`` and advances ``hbcounter`` by the
+        whole minutes of real time elapsed since the counter was last advanced
+        (with rollover). Returns the stored :class:`Server`.
         """
 
     @abc.abstractmethod
@@ -132,11 +142,26 @@ class InMemoryStorage(Storage):
         key = f"{fields['ip']}:{fields['port']}"
         async with self._lock:
             existing = self._servers.get(key)
-            hbcounter = next_hbcounter(
-                existing.hbcounter if existing else 0,
-                hbcounter_cap,
-                hbcounter_rollover_drop,
-            )
+            if existing is None:
+                # First contact: the registration beat itself counts as 1.
+                hbcounter = 1
+                hb_anchor = now
+            else:
+                elapsed_minutes = int(max(0.0, now - existing.hb_anchor) // 60)
+                hbcounter = next_hbcounter(
+                    existing.hbcounter,
+                    elapsed_minutes,
+                    hbcounter_cap,
+                    hbcounter_rollover_drop,
+                )
+                rolled = existing.hbcounter + elapsed_minutes >= hbcounter_cap
+                # Consume the whole minutes counted and carry the leftover
+                # seconds so they accrue toward the next minute. After a
+                # rollover the counter no longer maps to elapsed wall-clock
+                # time, so re-anchor to ``now``.
+                hb_anchor = (
+                    now if rolled else existing.hb_anchor + elapsed_minutes * 60
+                )
             server = Server(
                 ip=fields["ip"],
                 port=fields["port"],
@@ -147,6 +172,7 @@ class InMemoryStorage(Storage):
                 wss_port=fields.get("wss_port"),
                 hbcounter=hbcounter,
                 last_seen=now,
+                hb_anchor=hb_anchor,
             )
             self._servers[key] = server
             return server
