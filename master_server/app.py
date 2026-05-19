@@ -48,8 +48,12 @@ async def handle_heartbeat(request: web.Request) -> web.Response:
 
     # Fall back to the connecting IP when the client omits the "ip" field
     # (e.g. akashi only sends "ip" when serverDomainName is configured).
+    # Prefer proxy-set headers so we get the real client IP, not the proxy's.
     if isinstance(body, dict) and not body.get("ip"):
-        body = {**body, "ip": request.remote}
+        forwarded_for = request.headers.get("X-Forwarded-For")
+        real_ip = request.headers.get("X-Real-IP")
+        ip = (forwarded_for.split(",")[0].strip() if forwarded_for else None) or real_ip or request.remote
+        body = {**body, "ip": ip}
 
     try:
         fields = validate_heartbeat(body)
