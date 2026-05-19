@@ -13,6 +13,11 @@ import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
+# Weight applied to player count when computing rank score.
+# Must be > hbcounter_cap so that a single extra player always outranks
+# any difference in heartbeat stability.
+_RANK_HB_WEIGHT = 10081  # hbcounter_cap (10080) + 1
+
 
 @dataclass
 class Server:
@@ -33,6 +38,15 @@ class Server:
         """Unique identity of a server: its ip:port pair."""
         return f"{self.ip}:{self.port}"
 
+    @property
+    def score(self) -> int:
+        """Ranking score: players dominate, hbcounter breaks ties.
+
+        One extra player always outweighs any heartbeat difference.
+        Among equal player counts, a higher hbcounter (more uptime) ranks first.
+        """
+        return self.players * _RANK_HB_WEIGHT + self.hbcounter
+
     def public_dict(self) -> dict:
         """The shape exposed by ``GET /servers``.
 
@@ -46,6 +60,7 @@ class Server:
             "description": self.description,
             "players": self.players,
             "hbcounter": self.hbcounter,
+            "score": self.score,
         }
         if self.ws_port is not None:
             data["ws_port"] = self.ws_port
@@ -143,7 +158,7 @@ class InMemoryStorage(Storage):
         cutoff = now - expiry_seconds
         async with self._lock:
             active = [s for s in self._servers.values() if s.last_seen >= cutoff]
-        return sorted(active, key=lambda s: s.key)
+        return sorted(active, key=lambda s: (-s.score, s.key))
 
     async def purge_stale(
         self, expiry_seconds: float, now: Optional[float] = None
