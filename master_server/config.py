@@ -17,7 +17,7 @@ class Config:
 
     host: str = "0.0.0.0"
     port: int = 8000
-    heartbeat_expiry_minutes: float = 30.0
+    heartbeat_expiry_minutes: float = 60.0
     hbcounter_cap: int = 10080       # 1 hb/min × 60 min × 24 hr × 7 days
     hbcounter_rollover_drop: int = 1080  # rolls back to 9000
     purge_interval_seconds: float = 60.0

@@ -23,7 +23,7 @@ It is not a port of that code.
 - IP auto-detection when `ip` is omitted from heartbeat — reads
   `X-Forwarded-For` / `X-Real-IP` headers first, then falls back to the
   connecting IP. Works correctly behind nginx / Caddy.
-- Stale servers (no heartbeat for ~30 minutes) drop out of the listing,
+- Stale servers (no heartbeat for ~60 minutes / 1 hour) drop out of the listing,
   via both a background purge task and a lazy filter on read.
 - Strict, untrusted-input validation on heartbeats.
 - In-memory storage behind a `Storage` interface, so a SQLite backend can be
@@ -51,7 +51,7 @@ All settings come from environment variables:
 |-------------------------------|----------|------------------------------------------------------------|
 | `MS_HOST`                     | `0.0.0.0`| Listen host.                                               |
 | `MS_PORT`                     | `8000`   | Listen port.                                               |
-| `MS_HEARTBEAT_EXPIRY_MINUTES` | `30`     | Minutes of silence before a server is considered stale.    |
+| `MS_HEARTBEAT_EXPIRY_MINUTES` | `60`     | Minutes of silence before a server is considered stale.    |
 | `MS_HBCOUNTER_CAP`            | `10080`  | Value at which `hbcounter` rolls over (7 days at 1 hb/min).|
 | `MS_HBCOUNTER_ROLLOVER_DROP`  | `1080`   | How far `hbcounter` drops on rollover (resets to 9000).    |
 | `MS_PURGE_INTERVAL_SECONDS`   | `60`     | How often the background purge task runs.                  |
