@@ -37,7 +37,7 @@ async def handle_servers(request: web.Request) -> web.Response:
 
 
 async def handle_heartbeat(request: web.Request) -> web.Response:
-    """``POST /heartbeat`` -> register/refresh a server, return its record."""
+    """``POST /heartbeat`` or ``POST /servers`` -> register/refresh a server, return its record."""
     config: Config = request.app["config"]
     storage: Storage = request.app["storage"]
 
@@ -45,6 +45,11 @@ async def handle_heartbeat(request: web.Request) -> web.Response:
         body = await request.json()
     except Exception:
         return web.json_response({"error": "request body must be valid JSON"}, status=400)
+
+    # Fall back to the connecting IP when the client omits the "ip" field
+    # (e.g. akashi only sends "ip" when serverDomainName is configured).
+    if isinstance(body, dict) and not body.get("ip"):
+        body = {**body, "ip": request.remote}
 
     try:
         fields = validate_heartbeat(body)
@@ -98,6 +103,7 @@ def create_app(
 
     app.router.add_get("/", handle_root)
     app.router.add_get("/servers", handle_servers)
+    app.router.add_post("/servers", handle_heartbeat)  # akashi advertises here
     app.router.add_post("/heartbeat", handle_heartbeat)
 
     app.on_startup.append(_start_background_tasks)
