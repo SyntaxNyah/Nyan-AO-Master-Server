@@ -33,7 +33,10 @@ async def handle_servers(request: web.Request) -> web.Response:
     config: Config = request.app["config"]
     storage: Storage = request.app["storage"]
     servers = await storage.active_servers(config.heartbeat_expiry_seconds)
-    return web.json_response([s.public_dict() for s in servers])
+    return web.json_response(
+        [s.public_dict() for s in servers],
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 async def handle_heartbeat(request: web.Request) -> web.Response:
