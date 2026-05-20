@@ -32,6 +32,10 @@ class Server:
     wss_port: Optional[int] = None
     hbcounter: int = 0
     last_seen: float = field(default_factory=time.time)
+    # Censored servers are kept in storage (so their hbcounter still ticks and
+    # the heartbeat response looks normal to the operator), but ``shadowed=True``
+    # hides them from ``GET /servers``. Internal bookkeeping only.
+    shadowed: bool = False
     # Wall-clock time the current ``hbcounter`` value corresponds to. The
     # counter is advanced against this anchor (not the raw heartbeat rate), so
     # a server cannot inflate it by sending heartbeats faster than once a
@@ -102,25 +106,36 @@ class Storage(abc.ABC):
         hbcounter_cap: int,
         hbcounter_rollover_drop: int,
         now: Optional[float] = None,
+        shadowed: bool = False,
     ) -> Server:
         """Register or refresh a server from validated heartbeat ``fields``.
 
         Updates ``last_seen`` to ``now`` and advances ``hbcounter`` by the
         whole minutes of real time elapsed since the counter was last advanced
-        (with rollover). Returns the stored :class:`Server`.
+        (with rollover). ``shadowed=True`` marks the record so it is hidden
+        from ``active_servers`` while still ticking like a real one. Returns
+        the stored :class:`Server`.
         """
 
     @abc.abstractmethod
     async def active_servers(
         self, expiry_seconds: float, now: Optional[float] = None
     ) -> List[Server]:
-        """Return servers seen within ``expiry_seconds``, sorted by key."""
+        """Return non-shadowed servers seen within ``expiry_seconds``, sorted by rank."""
 
     @abc.abstractmethod
     async def purge_stale(
         self, expiry_seconds: float, now: Optional[float] = None
     ) -> int:
         """Drop servers not seen within ``expiry_seconds``. Returns count removed."""
+
+    @abc.abstractmethod
+    async def kick(self, ip: str, port: Optional[int] = None) -> int:
+        """Forcibly remove a server (or all servers from ``ip``). Returns count removed."""
+
+    @abc.abstractmethod
+    async def kick_matching(self, predicate) -> int:
+        """Remove every server for which ``predicate(server)`` returns truthy."""
 
 
 class InMemoryStorage(Storage):
@@ -137,6 +152,7 @@ class InMemoryStorage(Storage):
         hbcounter_cap: int,
         hbcounter_rollover_drop: int,
         now: Optional[float] = None,
+        shadowed: bool = False,
     ) -> Server:
         now = time.time() if now is None else now
         key = f"{fields['ip']}:{fields['port']}"
@@ -173,6 +189,7 @@ class InMemoryStorage(Storage):
                 hbcounter=hbcounter,
                 last_seen=now,
                 hb_anchor=hb_anchor,
+                shadowed=shadowed,
             )
             self._servers[key] = server
             return server
@@ -183,7 +200,11 @@ class InMemoryStorage(Storage):
         now = time.time() if now is None else now
         cutoff = now - expiry_seconds
         async with self._lock:
-            active = [s for s in self._servers.values() if s.last_seen >= cutoff]
+            active = [
+                s
+                for s in self._servers.values()
+                if s.last_seen >= cutoff and not s.shadowed
+            ]
         return sorted(active, key=lambda s: (-s.score, s.key))
 
     async def purge_stale(
@@ -196,3 +217,19 @@ class InMemoryStorage(Storage):
             for key in stale:
                 del self._servers[key]
         return len(stale)
+
+    async def kick(self, ip: str, port: Optional[int] = None) -> int:
+        async with self._lock:
+            if port is not None:
+                return 1 if self._servers.pop(f"{ip}:{port}", None) else 0
+            keys = [k for k, s in self._servers.items() if s.ip == ip]
+            for k in keys:
+                del self._servers[k]
+            return len(keys)
+
+    async def kick_matching(self, predicate) -> int:
+        async with self._lock:
+            keys = [k for k, s in self._servers.items() if predicate(s)]
+            for k in keys:
+                del self._servers[k]
+            return len(keys)

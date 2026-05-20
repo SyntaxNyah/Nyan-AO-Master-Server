@@ -120,3 +120,239 @@ async def test_heartbeat_truncates_long_free_text(client):
         )
     ).json()
     assert len(body["name"]) == 256
+
+
+# --------------------------------------------------------------------------- #
+# Moderation: censors, bans, admin endpoints
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture
+def censors_file(tmp_path):
+    p = tmp_path / "censors.txt"
+    p.write_text("casino\nfree gems\n")
+    return p
+
+
+@pytest.fixture
+def admin_config(tmp_path, censors_file):
+    bans_file = tmp_path / "bans.txt"
+    bans_file.write_text("9.9.9.9\n")
+    return Config(
+        host="127.0.0.1",
+        port=8000,
+        heartbeat_expiry_minutes=30.0,
+        hbcounter_cap=50000,
+        hbcounter_rollover_drop=1000,
+        purge_interval_seconds=3600.0,
+        censors_path=str(censors_file),
+        bans_path=str(bans_file),
+        admin_token="s3cret",
+    )
+
+
+@pytest.fixture
+async def admin_client(aiohttp_client, admin_config):
+    app = create_app(config=admin_config, storage=InMemoryStorage())
+    return await aiohttp_client(app)
+
+
+async def test_censored_server_pretends_advertise_but_hidden(admin_client):
+    resp = await admin_client.post(
+        "/heartbeat",
+        json={"ip": "1.2.3.4", "port": 27016, "name": "Best CASINO Ever"},
+    )
+    # Heartbeat looks successful to the operator.
+    assert resp.status == 200
+    body = await resp.json()
+    assert body["name"] == "Best CASINO Ever"
+    # But the server never appears in the public listing.
+    listing = await (await admin_client.get("/servers")).json()
+    assert listing == []
+
+
+async def test_censor_matches_description_too(admin_client):
+    await admin_client.post(
+        "/heartbeat",
+        json={
+            "ip": "1.2.3.4",
+            "port": 27016,
+            "name": "Polite Court",
+            "description": "Click for FREE GEMS!!",
+        },
+    )
+    assert await (await admin_client.get("/servers")).json() == []
+
+
+async def test_clean_server_still_listed(admin_client):
+    await admin_client.post(
+        "/heartbeat",
+        json={"ip": "1.2.3.4", "port": 27016, "name": "Polite Court"},
+    )
+    servers = await (await admin_client.get("/servers")).json()
+    assert len(servers) == 1
+    assert servers[0]["name"] == "Polite Court"
+
+
+async def test_banned_ip_via_bans_file_rejected(admin_client):
+    resp = await admin_client.post(
+        "/heartbeat", json={"ip": "9.9.9.9", "port": 27016}
+    )
+    assert resp.status == 403
+    assert (await resp.json())["error"] == "banned"
+
+
+async def test_admin_endpoints_require_token(admin_client):
+    resp = await admin_client.post("/admin/ban", json={"ip": "1.2.3.4"})
+    assert resp.status == 401
+    resp = await admin_client.post(
+        "/admin/ban",
+        json={"ip": "1.2.3.4"},
+        headers={"Authorization": "Bearer wrong"},
+    )
+    assert resp.status == 401
+
+
+async def test_admin_ban_then_unban(admin_client):
+    headers = {"Authorization": "Bearer s3cret"}
+    # Register a server, then ban its IP -> kicked from listing.
+    await admin_client.post("/heartbeat", json={"ip": "5.5.5.5", "port": 27016})
+    resp = await admin_client.post(
+        "/admin/ban",
+        json={"ip": "5.5.5.5", "duration_minutes": 60, "reason": "spam"},
+        headers=headers,
+    )
+    assert resp.status == 200
+    body = await resp.json()
+    assert body["banned"] == "5.5.5.5/32"
+    assert body["kicked"] == 1
+    # Heartbeat now rejected.
+    resp = await admin_client.post(
+        "/heartbeat", json={"ip": "5.5.5.5", "port": 27016}
+    )
+    assert resp.status == 403
+    # Unban -> heartbeat works again.
+    resp = await admin_client.delete(
+        "/admin/ban", json={"ip": "5.5.5.5"}, headers=headers
+    )
+    assert (await resp.json())["removed"] is True
+    resp = await admin_client.post(
+        "/heartbeat", json={"ip": "5.5.5.5", "port": 27016}
+    )
+    assert resp.status == 200
+
+
+async def test_admin_ban_permanent_when_no_duration(admin_client):
+    headers = {"Authorization": "Bearer s3cret"}
+    resp = await admin_client.post(
+        "/admin/ban", json={"ip": "6.6.6.6"}, headers=headers
+    )
+    assert resp.status == 200
+    listed = (await (await admin_client.get("/admin/bans", headers=headers)).json())["bans"]
+    entry = next(e for e in listed if e["network"] == "6.6.6.6/32")
+    assert entry["until"] is None
+    assert entry["source"] == "admin"
+
+
+async def test_admin_ban_cidr(admin_client):
+    headers = {"Authorization": "Bearer s3cret"}
+    await admin_client.post(
+        "/admin/ban", json={"ip": "10.0.0.0/8"}, headers=headers
+    )
+    resp = await admin_client.post(
+        "/heartbeat", json={"ip": "10.20.30.40", "port": 27016}
+    )
+    assert resp.status == 403
+
+
+async def test_admin_kick_removes_server(admin_client):
+    headers = {"Authorization": "Bearer s3cret"}
+    await admin_client.post(
+        "/heartbeat", json={"ip": "7.7.7.7", "port": 27016, "name": "A"}
+    )
+    await admin_client.post(
+        "/heartbeat", json={"ip": "7.7.7.7", "port": 27017, "name": "B"}
+    )
+    # Kick a single ip:port leaves the other.
+    resp = await admin_client.post(
+        "/admin/kick", json={"ip": "7.7.7.7", "port": 27016}, headers=headers
+    )
+    assert (await resp.json())["removed"] == 1
+    listing = await (await admin_client.get("/servers")).json()
+    assert [s["port"] for s in listing] == [27017]
+    # Kick the whole ip drops what's left.
+    resp = await admin_client.post(
+        "/admin/kick", json={"ip": "7.7.7.7"}, headers=headers
+    )
+    assert (await resp.json())["removed"] == 1
+    assert await (await admin_client.get("/servers")).json() == []
+
+
+async def test_admin_ban_via_asn_field(admin_client):
+    # Wire a fake ASN lookup directly onto the live BanList so we don't need
+    # a real MaxMind .mmdb file in tests.
+    bans = admin_client.app["bans"]
+    bans.set_asn_lookup(lambda ip: 15169 if ip == "8.8.8.8" else None)
+
+    # Register a Google IP, then ban its ASN -> server should be kicked.
+    await admin_client.post("/heartbeat", json={"ip": "8.8.8.8", "port": 27016})
+    headers = {"Authorization": "Bearer s3cret"}
+    resp = await admin_client.post(
+        "/admin/ban",
+        json={"asn": 15169, "reason": "datacenter spam"},
+        headers=headers,
+    )
+    assert resp.status == 200
+    body = await resp.json()
+    assert body["banned"] == "AS15169"
+    assert body["kicked"] == 1
+    # Heartbeat from the same ASN is now rejected.
+    resp = await admin_client.post("/heartbeat", json={"ip": "8.8.8.8", "port": 27016})
+    assert resp.status == 403
+
+
+async def test_admin_ban_via_as_prefix_in_ip_field(admin_client):
+    bans = admin_client.app["bans"]
+    bans.set_asn_lookup(lambda ip: 13335 if ip == "1.1.1.1" else None)
+    headers = {"Authorization": "Bearer s3cret"}
+    resp = await admin_client.post(
+        "/admin/ban", json={"ip": "AS13335"}, headers=headers
+    )
+    assert resp.status == 200
+    assert (await resp.json())["banned"] == "AS13335"
+    resp = await admin_client.post("/heartbeat", json={"ip": "1.1.1.1", "port": 27016})
+    assert resp.status == 403
+
+
+async def test_admin_unban_asn(admin_client):
+    bans = admin_client.app["bans"]
+    bans.set_asn_lookup(lambda ip: 15169)
+    headers = {"Authorization": "Bearer s3cret"}
+    await admin_client.post("/admin/ban", json={"asn": 15169}, headers=headers)
+    resp = await admin_client.delete("/admin/ban", json={"asn": 15169}, headers=headers)
+    assert (await resp.json())["removed"] is True
+    # Now heartbeat works again.
+    resp = await admin_client.post("/heartbeat", json={"ip": "1.2.3.4", "port": 27016})
+    assert resp.status == 200
+
+
+async def test_admin_disabled_when_no_token(aiohttp_client, censors_file, tmp_path):
+    cfg = Config(
+        host="127.0.0.1",
+        port=8000,
+        heartbeat_expiry_minutes=30.0,
+        hbcounter_cap=50000,
+        hbcounter_rollover_drop=1000,
+        purge_interval_seconds=3600.0,
+        censors_path=str(censors_file),
+        bans_path="",
+        admin_token="",
+    )
+    app = create_app(config=cfg, storage=InMemoryStorage())
+    client = await aiohttp_client(app)
+    resp = await client.post(
+        "/admin/ban",
+        json={"ip": "1.2.3.4"},
+        headers={"Authorization": "Bearer anything"},
+    )
+    assert resp.status == 503
