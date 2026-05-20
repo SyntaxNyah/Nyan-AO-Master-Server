@@ -56,6 +56,9 @@ All settings come from environment variables:
 | `MS_HBCOUNTER_CAP`            | `10080`  | Value at which `hbcounter` rolls over (7 days at 1 hb/min).|
 | `MS_HBCOUNTER_ROLLOVER_DROP`  | `1080`   | How far `hbcounter` drops on rollover (resets to 9000).    |
 | `MS_PURGE_INTERVAL_SECONDS`   | `60`     | How often the background purge task runs.                  |
+| `MS_CENSORS_PATH`             | `censors.txt` | Path to the censor word list. Empty disables censoring.|
+| `MS_BANS_PATH`                | `bans.txt`    | Path to the persistent ban list. Empty disables file bans.|
+| `MS_ADMIN_TOKEN`              | *(unset)*     | Bearer token for `/admin/*` endpoints. Unset disables them.|
 
 ### Running behind a reverse proxy
 
@@ -248,6 +251,115 @@ Point the bot's master-server URL at the listing endpoint:
 ```
 https://your-host/servers
 ```
+
+## Moderation: keeping the master server clean
+
+Three independent mechanisms let an operator keep the listing tidy without
+restarting the service. Files are hot-reloaded on mtime change.
+
+### Censoring offensive / spammy server names — `censors.txt`
+
+Drop forbidden phrases (slurs, scam wording, ad keywords, etc.) in
+`censors.txt`, one per line. If a heartbeat's `name` **or** `description`
+contains any phrase (case-insensitive substring match), the master server
+**pretends to advertise** the server — the heartbeat returns `200 OK` with a
+normal-looking record so the operator never sees an error — but the server
+is **shadow-listed** and never appears in `GET /servers`. Its `hbcounter`
+keeps ticking so the deception holds up to casual inspection.
+
+A default `censors.txt` ships with the repo and covers common slurs and
+harassment phrases out of the box. Open the file directly to review or
+extend it; the contents are deliberately not enumerated here. Use an empty
+file (or set `MS_CENSORS_PATH=""`) to disable censoring entirely.
+
+```text
+# censors.txt -- one phrase per line, # for comments, blank lines ignored
+casino
+free gems
+buy followers
+```
+
+Add or remove phrases at any time; the file is reloaded on its next access.
+
+### Banning servers by IP — `bans.txt`
+
+Banned IPs are rejected with `403 {"error": "banned"}` and immediately kicked
+from the live listing. Each entry can be **permanent** or **temporary with a
+per-IP duration** — durations are independent, so one IP can be banned for
+30 minutes while another is banned forever.
+
+```text
+# bans.txt
+# Permanent ban
+1.2.3.4
+# Whole CIDR range
+10.0.0.0/8
+# Temporary -- absolute deadline (UTC)
+4.4.4.4 until=2026-12-31T00:00:00Z reason=spam
+# Temporary -- relative duration (s/m/h/d; bare number = minutes)
+5.5.5.5 for=24h
+6.6.6.6 for=30m reason="heartbeat flood"
+```
+
+### Admin HTTP endpoints
+
+Set `MS_ADMIN_TOKEN=<secret>` to enable `/admin/*`. All requests need
+`Authorization: Bearer <secret>`.
+
+| Endpoint              | Body                                                          | Effect                                                         |
+|-----------------------|---------------------------------------------------------------|----------------------------------------------------------------|
+| `POST /admin/kick`    | `{"ip": "1.2.3.4", "port": 27016}` (port optional)            | Boots a registered server (or every server from that IP).      |
+| `POST /admin/ban`     | `{"ip": "1.2.3.4", "duration_minutes": 60, "reason": "spam"}` | Bans an IP/CIDR. Omit `duration_minutes` for a permanent ban.  |
+| `DELETE /admin/ban`   | `{"ip": "1.2.3.4"}`                                           | Lifts an admin-issued ban (file-loaded bans must be removed from `bans.txt`). |
+| `GET /admin/bans`     | —                                                             | Lists every active ban with its source, expiry, and reason.    |
+
+Each ban duration is set per IP, so booting one server temporarily while
+permanently banning another in the same call is fine.
+
+```sh
+# Temporary ban for an hour
+curl -X POST https://your-host/admin/ban \
+  -H 'Authorization: Bearer s3cret' -H 'Content-Type: application/json' \
+  -d '{"ip": "1.2.3.4", "duration_minutes": 60, "reason": "advertising slurs"}'
+
+# Boot a single server right now
+curl -X POST https://your-host/admin/kick \
+  -H 'Authorization: Bearer s3cret' -H 'Content-Type: application/json' \
+  -d '{"ip": "1.2.3.4", "port": 27016}'
+```
+
+If `MS_ADMIN_TOKEN` is unset, `/admin/*` returns `503` — never accidentally
+expose unauthenticated mod tools.
+
+### Banning from the console
+
+When the master server is launched in a terminal (`python -m master_server`),
+it opens an interactive console on stdin alongside the HTTP server. Useful
+for quick moderation without curl. The console no-ops cleanly when stdin is
+not a TTY (e.g. under systemd), so this is safe in production.
+
+```
+master-server console ready -- type 'help' for commands
+> ban 1.2.3.4 for=30m reason=flooding
+banned 1.2.3.4/32 until 2026-05-20T08:31:00Z; kicked 1 server(s)
+> ban 10.0.0.0/8
+banned 10.0.0.0/8 permanently; kicked 0 server(s)
+> kick play.example.com 27016
+kicked 1 server(s) matching play.example.com:27016
+> bans
+  1.2.3.4/32           [admin] until 2026-05-20T08:31:00Z reason='flooding'
+  10.0.0.0/8           [admin] permanent
+> unban 1.2.3.4
+unbanned 1.2.3.4
+> servers
+  1.2.3.5:27016 players=4 hb=12 'Polite Court'
+> reload
+reloaded censors.txt and bans.txt
+> help
+...
+```
+
+Console commands accept the same `for=<dur>` syntax as `bans.txt`.
 
 ## Development
 

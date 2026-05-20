@@ -16,7 +16,9 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     config = Config.from_env()
-    app = create_app(config=config)
+    # The stdin console is only useful when the process is attached to a
+    # terminal; ``console.py`` no-ops cleanly when stdin is not a TTY.
+    app = create_app(config=config, enable_console=True)
     web.run_app(app, host=config.host, port=config.port)
 
 

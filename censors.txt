@@ -1,0 +1,28 @@
+# Default slur / harassment word list -- shadow-lists matching server adverts.
+# Edit freely. One phrase per line. Lines starting with # are ignored.
+# Matching is case-insensitive substring; "nigg" catches "nigga", "n1gger", etc.
+nigger
+nigga
+nigg3r
+n1gger
+n1gg3r
+tranny
+trannie
+faggot
+fagot
+f4ggot
+fag
+retard
+retarded
+r3tard
+chink
+kike
+spic
+wetback
+gook
+coon
+dyke
+shemale
+groomer
+kys
+kill yourself

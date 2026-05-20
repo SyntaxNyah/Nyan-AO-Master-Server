@@ -21,6 +21,12 @@ class Config:
     hbcounter_cap: int = 10080       # 1 hb/min × 60 min × 24 hr × 7 days
     hbcounter_rollover_drop: int = 1080  # rolls back to 9000
     purge_interval_seconds: float = 60.0
+    # Moderation: when set, these files are watched and hot-reloaded on mtime
+    # change. Empty string disables the corresponding feature.
+    censors_path: str = "censors.txt"
+    bans_path: str = "bans.txt"
+    # Shared secret for /admin/* endpoints. Unset disables admin routes.
+    admin_token: str = ""
 
     @property
     def heartbeat_expiry_seconds(self) -> float:
@@ -43,6 +49,9 @@ class Config:
             purge_interval_seconds=float(
                 env.get("MS_PURGE_INTERVAL_SECONDS", defaults.purge_interval_seconds)
             ),
+            censors_path=env.get("MS_CENSORS_PATH", defaults.censors_path),
+            bans_path=env.get("MS_BANS_PATH", defaults.bans_path),
+            admin_token=env.get("MS_ADMIN_TOKEN", defaults.admin_token),
         )
         cfg.validate()
         return cfg
