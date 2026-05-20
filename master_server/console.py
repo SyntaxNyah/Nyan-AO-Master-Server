@@ -34,9 +34,11 @@ log = logging.getLogger("master_server.console")
 
 _HELP = """\
 Commands:
-  ban <ip|cidr> [for=<dur>] [reason=<text>]   Ban an IP or CIDR. Omit "for" for permanent.
+  ban <ip|cidr|AS<n>> [for=<dur>] [reason=<text>]
+                                              Ban an IP, CIDR, or whole ASN.
+                                              Omit "for" for permanent.
                                               <dur> = 30s | 15m | 24h | 7d (bare number = minutes).
-  unban <ip|cidr>                             Remove an admin-issued ban.
+  unban <ip|cidr|AS<n>>                       Remove an admin-issued ban.
   kick <ip> [port]                            Drop a registered server (or all from <ip>).
   bans                                        List active bans.
   servers                                     List currently registered servers.
@@ -71,7 +73,7 @@ async def _handle_command(app: "web.Application", line: str) -> str:
 
     if cmd == "ban":
         if not args:
-            return "usage: ban <ip|cidr> [for=<dur>] [reason=<text>]"
+            return "usage: ban <ip|cidr|AS<n>> [for=<dur>] [reason=<text>]"
         target = args[0]
         kv = _parse_tokens(args[1:])
         duration_minutes: Optional[float] = None
@@ -100,11 +102,11 @@ async def _handle_command(app: "web.Application", line: str) -> str:
                 .replace("+00:00", "Z")
             )
             tail = f"until {iso}"
-        return f"banned {entry.network} {tail}; kicked {kicked} server(s)"
+        return f"banned {entry.label} {tail}; kicked {kicked} server(s)"
 
     if cmd == "unban":
         if not args:
-            return "usage: unban <ip|cidr>"
+            return "usage: unban <ip|cidr|AS<n>>"
         removed = bans.remove(args[0])
         if removed:
             return f"unbanned {args[0]}"
@@ -132,7 +134,7 @@ async def _handle_command(app: "web.Application", line: str) -> str:
         for e in active:
             tail = f"until {e['until']}" if e["until"] else "permanent"
             extras = f" reason={e['reason']!r}" if e["reason"] else ""
-            lines.append(f"  {e['network']:<20} [{e['source']}] {tail}{extras}")
+            lines.append(f"  {e['target']:<20} [{e['source']}] {tail}{extras}")
         return "\n".join(lines)
 
     if cmd == "servers":

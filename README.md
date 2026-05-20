@@ -59,6 +59,7 @@ All settings come from environment variables:
 | `MS_CENSORS_PATH`             | `censors.txt` | Path to the censor word list. Empty disables censoring.|
 | `MS_BANS_PATH`                | `bans.txt`    | Path to the persistent ban list. Empty disables file bans.|
 | `MS_ADMIN_TOKEN`              | *(unset)*     | Bearer token for `/admin/*` endpoints. Unset disables them.|
+| `MS_ASN_DB_PATH`              | *(unset)*     | Path to a MaxMind `GeoLite2-ASN.mmdb`. Enables `AS<n>` bans.|
 
 ### Running behind a reverse proxy
 
@@ -281,16 +282,24 @@ buy followers
 
 Add or remove phrases at any time; the file is reloaded on its next access.
 
-### Banning servers by IP — `bans.txt`
+### Banning servers by IP or ASN — `bans.txt`
 
 Banned IPs are rejected with `403 {"error": "banned"}` and immediately kicked
 from the live listing. Each entry can be **permanent** or **temporary with a
-per-IP duration** — durations are independent, so one IP can be banned for
-30 minutes while another is banned forever.
+per-entry duration** — durations are independent, so one entry can be banned
+for 30 minutes while another is banned forever.
+
+Supported target syntaxes:
+
+* **IP** (`1.2.3.4`) or **CIDR** (`10.0.0.0/8`) — always available.
+* **Whole ASN** (`AS15169`, `AS13335`, …) — useful when a single bad actor
+  is hopping IPs inside one provider's network. Requires the MaxMind
+  GeoLite2-ASN database (see [ASN setup](#asn-setup) below); without it, ASN
+  entries are still parsed and listed but never match.
 
 ```text
 # bans.txt
-# Permanent ban
+# Permanent IP ban
 1.2.3.4
 # Whole CIDR range
 10.0.0.0/8
@@ -299,28 +308,52 @@ per-IP duration** — durations are independent, so one IP can be banned for
 # Temporary -- relative duration (s/m/h/d; bare number = minutes)
 5.5.5.5 for=24h
 6.6.6.6 for=30m reason="heartbeat flood"
+# Whole ASN -- needs MS_ASN_DB_PATH configured
+AS15169
+AS13335 for=24h reason="datacenter flood"
 ```
+
+#### ASN setup
+
+ASN bans need an IP→ASN map. Install the optional dependency and point the
+service at a free GeoLite2-ASN database:
+
+```sh
+pip install maxminddb
+# Download GeoLite2-ASN.mmdb from MaxMind (free, requires an account):
+# https://dev.maxmind.com/geoip/geolite2-free-geolocation-data
+export MS_ASN_DB_PATH=/var/lib/geoip/GeoLite2-ASN.mmdb
+```
+
+When `MS_ASN_DB_PATH` is set, the service logs `ASN bans enabled` at
+startup; lookups are cached so heartbeats from a known peer don't re-hit the
+database.
 
 ### Admin HTTP endpoints
 
 Set `MS_ADMIN_TOKEN=<secret>` to enable `/admin/*`. All requests need
 `Authorization: Bearer <secret>`.
 
-| Endpoint              | Body                                                          | Effect                                                         |
-|-----------------------|---------------------------------------------------------------|----------------------------------------------------------------|
-| `POST /admin/kick`    | `{"ip": "1.2.3.4", "port": 27016}` (port optional)            | Boots a registered server (or every server from that IP).      |
-| `POST /admin/ban`     | `{"ip": "1.2.3.4", "duration_minutes": 60, "reason": "spam"}` | Bans an IP/CIDR. Omit `duration_minutes` for a permanent ban.  |
-| `DELETE /admin/ban`   | `{"ip": "1.2.3.4"}`                                           | Lifts an admin-issued ban (file-loaded bans must be removed from `bans.txt`). |
-| `GET /admin/bans`     | —                                                             | Lists every active ban with its source, expiry, and reason.    |
+| Endpoint              | Body                                                                      | Effect                                                         |
+|-----------------------|---------------------------------------------------------------------------|----------------------------------------------------------------|
+| `POST /admin/kick`    | `{"ip": "1.2.3.4", "port": 27016}` (port optional)                        | Boots a registered server (or every server from that IP).      |
+| `POST /admin/ban`     | `{"ip"\|"target": "1.2.3.4"\|"AS15169", "duration_minutes"?, "reason"?}` or `{"asn": 15169, ...}` | Bans an IP, CIDR, or whole ASN. Omit `duration_minutes` for a permanent ban. |
+| `DELETE /admin/ban`   | Same shape as `POST /admin/ban` (target only)                             | Lifts an admin-issued ban (file-loaded bans must be removed from `bans.txt`). |
+| `GET /admin/bans`     | —                                                                         | Lists every active ban with its source, expiry, and reason.    |
 
-Each ban duration is set per IP, so booting one server temporarily while
+Each ban duration is set per entry, so booting one server temporarily while
 permanently banning another in the same call is fine.
 
 ```sh
-# Temporary ban for an hour
+# Temporary IP ban for an hour
 curl -X POST https://your-host/admin/ban \
   -H 'Authorization: Bearer s3cret' -H 'Content-Type: application/json' \
   -d '{"ip": "1.2.3.4", "duration_minutes": 60, "reason": "advertising slurs"}'
+
+# Ban a whole ASN (e.g. a cheap VPS provider being abused)
+curl -X POST https://your-host/admin/ban \
+  -H 'Authorization: Bearer s3cret' -H 'Content-Type: application/json' \
+  -d '{"asn": 14061, "duration_minutes": 1440, "reason": "vps spam"}'
 
 # Boot a single server right now
 curl -X POST https://your-host/admin/kick \
@@ -344,6 +377,8 @@ master-server console ready -- type 'help' for commands
 banned 1.2.3.4/32 until 2026-05-20T08:31:00Z; kicked 1 server(s)
 > ban 10.0.0.0/8
 banned 10.0.0.0/8 permanently; kicked 0 server(s)
+> ban AS15169 for=24h reason="datacenter spam"
+banned AS15169 until 2026-05-21T08:01:00Z; kicked 2 server(s)
 > kick play.example.com 27016
 kicked 1 server(s) matching play.example.com:27016
 > bans

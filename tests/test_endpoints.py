@@ -288,6 +288,54 @@ async def test_admin_kick_removes_server(admin_client):
     assert await (await admin_client.get("/servers")).json() == []
 
 
+async def test_admin_ban_via_asn_field(admin_client):
+    # Wire a fake ASN lookup directly onto the live BanList so we don't need
+    # a real MaxMind .mmdb file in tests.
+    bans = admin_client.app["bans"]
+    bans.set_asn_lookup(lambda ip: 15169 if ip == "8.8.8.8" else None)
+
+    # Register a Google IP, then ban its ASN -> server should be kicked.
+    await admin_client.post("/heartbeat", json={"ip": "8.8.8.8", "port": 27016})
+    headers = {"Authorization": "Bearer s3cret"}
+    resp = await admin_client.post(
+        "/admin/ban",
+        json={"asn": 15169, "reason": "datacenter spam"},
+        headers=headers,
+    )
+    assert resp.status == 200
+    body = await resp.json()
+    assert body["banned"] == "AS15169"
+    assert body["kicked"] == 1
+    # Heartbeat from the same ASN is now rejected.
+    resp = await admin_client.post("/heartbeat", json={"ip": "8.8.8.8", "port": 27016})
+    assert resp.status == 403
+
+
+async def test_admin_ban_via_as_prefix_in_ip_field(admin_client):
+    bans = admin_client.app["bans"]
+    bans.set_asn_lookup(lambda ip: 13335 if ip == "1.1.1.1" else None)
+    headers = {"Authorization": "Bearer s3cret"}
+    resp = await admin_client.post(
+        "/admin/ban", json={"ip": "AS13335"}, headers=headers
+    )
+    assert resp.status == 200
+    assert (await resp.json())["banned"] == "AS13335"
+    resp = await admin_client.post("/heartbeat", json={"ip": "1.1.1.1", "port": 27016})
+    assert resp.status == 403
+
+
+async def test_admin_unban_asn(admin_client):
+    bans = admin_client.app["bans"]
+    bans.set_asn_lookup(lambda ip: 15169)
+    headers = {"Authorization": "Bearer s3cret"}
+    await admin_client.post("/admin/ban", json={"asn": 15169}, headers=headers)
+    resp = await admin_client.delete("/admin/ban", json={"asn": 15169}, headers=headers)
+    assert (await resp.json())["removed"] is True
+    # Now heartbeat works again.
+    resp = await admin_client.post("/heartbeat", json={"ip": "1.2.3.4", "port": 27016})
+    assert resp.status == 200
+
+
 async def test_admin_disabled_when_no_token(aiohttp_client, censors_file, tmp_path):
     cfg = Config(
         host="127.0.0.1",

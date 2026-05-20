@@ -4,7 +4,14 @@ import time
 
 import pytest
 
-from master_server.moderation import BanList, Censor, _parse_duration, _parse_until
+from master_server.moderation import (
+    BanList,
+    Censor,
+    _parse_asn,
+    _parse_duration,
+    _parse_until,
+    parse_ban_target,
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -169,3 +176,108 @@ def test_parse_duration_rejects_garbage(raw):
 
 def test_parse_until_handles_z_suffix():
     assert _parse_until("2030-01-01T00:00:00Z") is not None
+
+
+# --------------------------------------------------------------------------- #
+# ASN parsing & bans
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("AS15169", 15169),
+        ("as15169", 15169),
+        ("ASN15169", 15169),
+        ("asn15169", 15169),
+        ("AS0", 0),
+    ],
+)
+def test_parse_asn_accepts_common_forms(raw, expected):
+    assert _parse_asn(raw) == expected
+
+
+@pytest.mark.parametrize("raw", ["", "15169", "ASfoo", "A15169", "AS", "1.2.3.4"])
+def test_parse_asn_rejects_garbage(raw):
+    assert _parse_asn(raw) is None
+
+
+def test_parse_ban_target_prefers_asn_over_ip():
+    assert parse_ban_target("AS15169") == ("asn", 15169)
+    kind, value = parse_ban_target("10.0.0.0/8")
+    assert kind == "net"
+    assert str(value) == "10.0.0.0/8"
+    assert parse_ban_target("not-a-thing") is None
+
+
+def test_asn_ban_uses_lookup():
+    # The lookup function is the only knob -- no real .mmdb file in the test.
+    lookups = {"1.2.3.4": 15169, "5.5.5.5": 13335}
+    b = BanList(None, asn_lookup=lambda ip: lookups.get(ip))
+    b.add("AS15169")
+    assert b.is_banned("1.2.3.4")     # Google ASN ban catches Google IP
+    assert not b.is_banned("5.5.5.5")  # Cloudflare IP unaffected
+    assert not b.is_banned("9.9.9.9")  # unknown IP -> no asn -> no match
+
+
+def test_asn_ban_inert_without_lookup():
+    # Without an asn_lookup the ban is stored but never matches -- the
+    # operator gets a heads-up at startup but heartbeats keep flowing.
+    b = BanList(None, asn_lookup=None)
+    b.add("AS15169")
+    assert not b.is_banned("1.2.3.4")
+    # The entry is still listed so operators can see it's configured.
+    listed = b.list_active()
+    assert listed[0]["target"] == "AS15169"
+    assert listed[0]["kind"] == "asn"
+
+
+def test_asn_ban_with_duration_expires():
+    b = BanList(None, asn_lookup=lambda ip: 15169)
+    b.add("AS15169", duration_minutes=10, now=1000.0)
+    assert b.is_banned("1.2.3.4", now=1000.0)
+    assert not b.is_banned("1.2.3.4", now=1000.0 + 601)
+
+
+def test_asn_ban_unban_round_trip():
+    b = BanList(None, asn_lookup=lambda ip: 15169)
+    b.add("AS15169")
+    assert b.is_banned("1.2.3.4")
+    assert b.remove("AS15169")
+    assert not b.is_banned("1.2.3.4")
+    # Removing a non-existent ASN ban is a no-op.
+    assert not b.remove("AS15169")
+
+
+def test_asn_lookup_failure_does_not_crash(caplog):
+    def boom(ip):
+        raise RuntimeError("db corrupted")
+
+    b = BanList(None, asn_lookup=boom)
+    b.add("AS15169")
+    # Should swallow the exception, log it, and treat as "not banned".
+    assert not b.is_banned("1.2.3.4")
+
+
+def test_bans_file_parses_asn_entries(tmp_path):
+    p = tmp_path / "bans.txt"
+    p.write_text("AS15169\nAS13335 for=24h reason=cloudflare\n")
+    b = BanList(str(p), asn_lookup=lambda ip: 15169)
+    assert b.is_banned("8.8.8.8")  # Google
+    listed = {e["target"]: e for e in b.list_active()}
+    assert "AS15169" in listed
+    assert listed["AS13335"]["reason"] == "cloudflare"
+
+
+def test_asn_lookup_not_called_when_no_asn_bans():
+    # Optimisation: do not pay for the lookup on the common path.
+    calls = []
+
+    def lookup(ip):
+        calls.append(ip)
+        return 12345
+
+    b = BanList(None, asn_lookup=lookup)
+    b.add("1.2.3.4")  # only IP bans
+    b.is_banned("9.9.9.9")
+    assert calls == []

@@ -10,7 +10,7 @@ from aiohttp import web
 
 from master_server.config import Config
 from master_server.console import start_console
-from master_server.moderation import BanList, Censor
+from master_server.moderation import BanList, Censor, MaxMindAsnLookup
 from master_server.storage import InMemoryStorage, Storage
 from master_server.validation import ValidationError, validate_heartbeat
 
@@ -142,11 +142,31 @@ async def handle_admin_kick(request: web.Request) -> web.Response:
     return web.json_response({"removed": removed})
 
 
-async def handle_admin_ban(request: web.Request) -> web.Response:
-    """``POST /admin/ban`` -- add a ban. Body: ``{"ip", "duration_minutes"?, "reason"?}``.
+def _extract_ban_target(body: dict) -> Optional[str]:
+    """Pull an ASN/IP/CIDR target out of an admin request body.
 
-    Omit ``duration_minutes`` for a permanent ban. The banned IP is also
-    kicked from the live listing immediately.
+    Accepts ``{"asn": 15169}``, ``{"ip": "AS15169"}``, or ``{"ip": "1.2.3.4"}``
+    so the same handler covers all three forms.
+    """
+    asn = body.get("asn")
+    if asn is not None:
+        if isinstance(asn, bool) or not isinstance(asn, int) or asn <= 0:
+            return None
+        return f"AS{asn}"
+    ip = body.get("ip") or body.get("target")
+    if isinstance(ip, str) and ip.strip():
+        return ip.strip()
+    return None
+
+
+async def handle_admin_ban(request: web.Request) -> web.Response:
+    """``POST /admin/ban`` -- add a ban.
+
+    Body: ``{"ip"|"target": "1.2.3.4" | "AS15169", "duration_minutes"?, "reason"?}``
+    or ``{"asn": 15169, "duration_minutes"?, "reason"?}``.
+
+    Omit ``duration_minutes`` for a permanent ban. Any server matching the
+    new ban is kicked from the live listing immediately.
     """
     guard = _admin_guard(request)
     if guard is not None:
@@ -157,9 +177,11 @@ async def handle_admin_ban(request: web.Request) -> web.Response:
         return web.json_response({"error": "invalid JSON"}, status=400)
     if not isinstance(body, dict):
         return web.json_response({"error": "body must be a JSON object"}, status=400)
-    ip = body.get("ip")
-    if not isinstance(ip, str) or not ip.strip():
-        return web.json_response({"error": "ip is required"}, status=400)
+    target = _extract_ban_target(body)
+    if target is None:
+        return web.json_response(
+            {"error": "ip, target, or asn is required"}, status=400
+        )
     duration = body.get("duration_minutes")
     if duration is not None:
         if isinstance(duration, bool) or not isinstance(duration, (int, float)):
@@ -178,22 +200,26 @@ async def handle_admin_ban(request: web.Request) -> web.Response:
     storage: Storage = request.app["storage"]
     try:
         entry = bans.add(
-            ip.strip(),
+            target,
             duration_minutes=float(duration) if duration is not None else None,
             reason=reason[:256],
         )
     except ValueError as exc:
         return web.json_response({"error": str(exc)}, status=400)
     # Drop anyone matching the new ban from the live listing right away.
+    # is_banned resolves ASN if needed, so ASN bans kick existing servers too.
     kicked = await storage.kick_matching(lambda s: bans.is_banned(s.ip))
-    log.info("banned %s (duration=%s); kicked %d server(s)", entry.network, duration, kicked)
+    log.info("banned %s (duration=%s); kicked %d server(s)", entry.label, duration, kicked)
     return web.json_response(
-        {"banned": str(entry.network), "kicked": kicked, "entry": bans.list_active()}
+        {"banned": entry.label, "kicked": kicked, "bans": bans.list_active()}
     )
 
 
 async def handle_admin_unban(request: web.Request) -> web.Response:
-    """``DELETE /admin/ban`` -- remove an admin-issued ban. Body: ``{"ip"}``."""
+    """``DELETE /admin/ban`` -- remove an admin-issued ban.
+
+    Body: ``{"ip"|"target": "1.2.3.4" | "AS15169"}`` or ``{"asn": 15169}``.
+    """
     guard = _admin_guard(request)
     if guard is not None:
         return guard
@@ -203,11 +229,13 @@ async def handle_admin_unban(request: web.Request) -> web.Response:
         return web.json_response({"error": "invalid JSON"}, status=400)
     if not isinstance(body, dict):
         return web.json_response({"error": "body must be a JSON object"}, status=400)
-    ip = body.get("ip")
-    if not isinstance(ip, str) or not ip.strip():
-        return web.json_response({"error": "ip is required"}, status=400)
+    target = _extract_ban_target(body)
+    if target is None:
+        return web.json_response(
+            {"error": "ip, target, or asn is required"}, status=400
+        )
     bans: BanList = request.app["bans"]
-    removed = bans.remove(ip.strip())
+    removed = bans.remove(target)
     return web.json_response({"removed": removed})
 
 
@@ -271,7 +299,19 @@ def create_app(
     app["config"] = config if config is not None else Config.from_env()
     app["storage"] = storage if storage is not None else InMemoryStorage()
     app["censor"] = Censor(app["config"].censors_path or None)
-    app["bans"] = BanList(app["config"].bans_path or None)
+    asn_lookup = None
+    if app["config"].asn_db_path:
+        try:
+            asn_lookup = MaxMindAsnLookup(app["config"].asn_db_path)
+            log.info("ASN bans enabled (db=%s)", app["config"].asn_db_path)
+        except Exception as exc:  # noqa: BLE001 - log and continue without ASN
+            log.warning(
+                "ASN bans disabled: could not open %s (%s). "
+                "AS<n> entries will be parsed but never match.",
+                app["config"].asn_db_path,
+                exc,
+            )
+    app["bans"] = BanList(app["config"].bans_path or None, asn_lookup=asn_lookup)
     app["enable_console"] = enable_console
 
     app.router.add_get("/", handle_root)

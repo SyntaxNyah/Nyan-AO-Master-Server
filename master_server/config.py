@@ -27,6 +27,10 @@ class Config:
     bans_path: str = "bans.txt"
     # Shared secret for /admin/* endpoints. Unset disables admin routes.
     admin_token: str = ""
+    # MaxMind GeoLite2-ASN ``.mmdb`` path. When set (and the optional
+    # ``maxminddb`` package is installed), ``AS<n>`` entries in bans.txt and
+    # the admin API are honoured. Unset = ASN bans are parsed but never match.
+    asn_db_path: str = ""
 
     @property
     def heartbeat_expiry_seconds(self) -> float:
@@ -52,6 +56,7 @@ class Config:
             censors_path=env.get("MS_CENSORS_PATH", defaults.censors_path),
             bans_path=env.get("MS_BANS_PATH", defaults.bans_path),
             admin_token=env.get("MS_ADMIN_TOKEN", defaults.admin_token),
+            asn_db_path=env.get("MS_ASN_DB_PATH", defaults.asn_db_path),
         )
         cfg.validate()
         return cfg
