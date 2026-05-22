@@ -409,4 +409,4 @@ input validation.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+APGL — see [LICENSE](LICENSE).
