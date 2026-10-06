@@ -13,9 +13,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install Dependencies
-        run: |
-          pip install pytest
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+        run: pip install -r requirements-dev.txt
       - name: Run Tests
         run: pytest
 
