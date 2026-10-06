@@ -102,8 +102,6 @@ async def test_optional_ws_ports_present_when_supplied(client):
     "payload",
     [
         {},
-        {"port": 27016},
-        {"ip": "", "port": 27016},
         {"ip": "  ", "port": 27016},
         {"ip": "1.2.3.4"},
         {"ip": "1.2.3.4", "port": 0},
@@ -117,6 +115,16 @@ async def test_heartbeat_rejects_invalid_input(client, payload):
     resp = await client.post("/heartbeat", json=payload)
     assert resp.status == 400
     assert "error" in await resp.json()
+
+
+async def test_heartbeat_auto_fills_missing_ip(client):
+    """A heartbeat that omits (or blanks) ``ip`` is auto-filled from the
+    connecting address, so clients that don't know their public IP still
+    register (akashi only sends ``ip`` when a custom hostname is set)."""
+    for payload in ({"port": 27016}, {"ip": "", "port": 27016}):
+        body = await (await client.post("/heartbeat", json=payload)).json()
+        assert body["ip"]
+        assert body["port"] == 27016
 
 
 async def test_heartbeat_rejects_non_json_body(client):
