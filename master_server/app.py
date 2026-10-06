@@ -17,6 +17,26 @@ from master_server.validation import ValidationError, validate_heartbeat
 log = logging.getLogger("master_server")
 
 
+@web.middleware
+async def cors_middleware(request: web.Request, handler) -> web.StreamResponse:
+    """Attach permissive CORS headers so browser clients can read the list.
+
+    The LemmyAO lobby (and any other web client) fetches ``GET /servers`` from
+    a different origin, so without these headers the browser refuses the
+    response. ``OPTIONS`` preflights are answered directly; everything else
+    gets ``Access-Control-Allow-Origin: *`` on the way out.
+    """
+    if request.method == "OPTIONS":
+        response = web.Response()
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Allow-Methods"] = "GET, POST, DELETE, OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type"
+        return response
+    response = await handler(request)
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    return response
+
+
 async def handle_root(request: web.Request) -> web.Response:
     """Tiny service banner / health check."""
     return web.json_response(
@@ -295,7 +315,7 @@ def create_app(
     come from the environment and an in-memory store. ``enable_console=True``
     starts the stdin-driven admin console alongside the HTTP server.
     """
-    app = web.Application()
+    app = web.Application(middlewares=[cors_middleware])
     app["config"] = config if config is not None else Config.from_env()
     app["storage"] = storage if storage is not None else InMemoryStorage()
     app["censor"] = Censor(app["config"].censors_path or None)

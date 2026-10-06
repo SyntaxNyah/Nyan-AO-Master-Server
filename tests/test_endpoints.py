@@ -31,6 +31,18 @@ async def test_servers_starts_empty(client):
     assert await resp.json() == []
 
 
+async def test_servers_sets_cors_header(client):
+    resp = await client.get("/servers")
+    assert resp.headers.get("Access-Control-Allow-Origin") == "*"
+
+
+async def test_options_preflight_allows_cors(client):
+    resp = await client.options("/servers")
+    assert resp.status == 200
+    assert resp.headers.get("Access-Control-Allow-Origin") == "*"
+    assert "GET" in resp.headers.get("Access-Control-Allow-Methods", "")
+
+
 async def test_heartbeat_registers_and_appears_in_listing(client):
     resp = await client.post(
         "/heartbeat",
